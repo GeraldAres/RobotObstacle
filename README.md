@@ -86,14 +86,16 @@ If no rules fire (Σ μ(y) == 0), the UI displays "NO ACTIVATION" and does not m
 - Fuzzification: numeric display of membership degrees.
 - Rule evaluation: textual display of 9 rule firing strengths.
 - Output: Aggregated fuzzy output, numeric centroid, and movement label.
-- Visualizations: Membership plots for Distance, Direction, and Output plus a control-surface heatmap (Distance vs Direction -> Crisp Output).
+- Visualizations: Membership plots for Distance, Direction, and Output; a 2D heatmap of the control surface; and a 3D WinForms Chart surface.
+- 3D surface axes: X = Distance, depth = Direction, height (Z) = crisp Mamdani movement output. A white diamond marks the current input.
+- The surface is sampled from the same Mamdani pipeline as the numeric output (not a simplified if/else map). Live rendering uses a 40×40 grid computed in the background; after a short debounce (or the High-Res button) it upgrades to 100×100.
 
 ## 8. Tests
 A test harness is included in the app (Run Tests) which executes the nine canonical cases and several boundary points and prints membership values, rule activations, centroid, and movement.
 
 ## 9. Limitations
 - The output numeric encoding (0,33,66,100) is a design choice to allow centroid defuzzification; that mapping is documented and defended in DEFENSE.md.
-- A 2D heatmap is used for the control surface. A full 3D interactive surface is not included to keep the project dependency-free and simple.
+- The 3D surface uses the built-in WinForms Chart control (`System.Windows.Forms.DataVisualization`) with 3D line series. It is not OpenGL/OpenTK. Depth is Direction (one series per direction sample); height is the real Mamdani centroid.
 
 ## 10. How to run
-Open the solution in Visual Studio (targets .NET Framework 4.8) and run the project. Use the TrackBars or numeric inputs to change Distance and Direction; the system updates dynamically. Use Run Tests to verify canonical scenarios.
+Open the solution in Visual Studio (targets .NET Framework 4.8) and run the project. Use the TrackBars or numeric inputs to change Distance and Direction; the system updates dynamically (including the heatmap/3D markers). Scroll down to rotate the 3D surface. Use Run Tests in the UI, or run `RobotObstacle.exe --test` to write `test-results.txt`.

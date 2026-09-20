@@ -1,22 +1,32 @@
 ﻿using System;
+using System.Drawing;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Globalization;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
-using System.Drawing;
+using System.Windows.Forms.DataVisualization.Charting;
 
 namespace RobotObstacle
 {
     public partial class Form1 : Form
     {
-        // Prevents TrackBar and NumericUpDown from updating each other in a loop.
         private bool syncingInputs;
+        private int surfaceGeneration;
+        private double[,] surfaceZ;
+        private int surfaceResolution;
+        private Bitmap heatmapBase;
+        private bool highResQueued;
 
-        // Small step used to approximate the area under the aggregated fuzzy set.
-        private const double IntegrationStep = 0.5;
+        public const int LiveSurfaceResolution = 40;
+        public const int HighResSurfaceResolution = 100;
 
         public Form1()
         {
             InitializeComponent();
+            // surface debounce Timer is created in Designer as 'surfaceDebounce'.
         }
 
         private void Form1_Load(object sender, EventArgs e)
@@ -39,92 +49,10 @@ namespace RobotObstacle
                 "  Turn Right  peak at 66   triangle (33, 66, 100)" + Environment.NewLine +
                 "  Stop        peak at 100  triangle (66, 100, 100)";
 
-            RunMamdani();
-
-            // Initialize charts and visualizations
             InitializeCharts();
             PlotAllMemberships();
-            RenderControlSurface();
-        }
-
-        // ---------------------------------------------------------------------
-        //  Triangular membership function
-        //  μ = 0 outside [a, c]
-        //  μ rises from a to peak b, then falls from b to c
-        //  If a == b the set is a left shoulder (full membership at the left edge)
-        //  If b == c the set is a right shoulder (full membership at the right edge)
-        // ---------------------------------------------------------------------
-        static double TriangularMembership(double x, double a, double b, double c)
-        {
-            if (x < a || x > c)
-                return 0.0;
-
-            if (x <= b)
-            {
-                if (b == a)
-                    return 1.0;
-                return (x - a) / (b - a);
-            }
-
-            if (c == b)
-                return 1.0;
-            return (c - x) / (c - b);
-        }
-
-        // ---------------------------------------------------------------------
-        //  Input membership functions  (documented in the UI as well)
-        // ---------------------------------------------------------------------
-        static double MuNear(double distance)
-        {
-            return TriangularMembership(distance, 0, 0, 50);
-        }
-
-        static double MuMedium(double distance)
-        {
-            return TriangularMembership(distance, 20, 50, 80);
-        }
-
-        static double MuFar(double distance)
-        {
-            return TriangularMembership(distance, 50, 100, 100);
-        }
-
-        static double MuLeft(double direction)
-        {
-            return TriangularMembership(direction, -100, -100, 0);
-        }
-
-        static double MuCenter(double direction)
-        {
-            return TriangularMembership(direction, -50, 0, 50);
-        }
-
-        static double MuRight(double direction)
-        {
-            return TriangularMembership(direction, 0, 100, 100);
-        }
-
-        // Output sets live on a number line only so we can compute a centroid.
-        // The numbers themselves are not "degrees"; they encode movement:
-        //   0 = Turn Left,  33 = Forward,  66 = Turn Right,  100 = Stop
-        static double MuTurnLeft(double y)
-        {
-            return TriangularMembership(y, 0, 0, 33);
-        }
-
-        static double MuForward(double y)
-        {
-            return TriangularMembership(y, 0, 33, 66);
-        }
-
-        static double MuTurnRight(double y)
-        {
-            return TriangularMembership(y, 33, 66, 100);
-        }
-
-        static double MuStop(double y)
-        {
-            return TriangularMembership(y, 66, 100, 100);
+            RunMamdani();
+            RequestSurfaceCompute(LiveSurfaceResolution, false);
         }
 
         private void btnCalculate_Click(object sender, EventArgs e)
@@ -145,52 +73,28 @@ namespace RobotObstacle
             txtFuzz.Clear();
             txtRules.Clear();
             txtResult.Clear();
+            PlotAllMemberships();
+            DrawHeatmapWithMarker();
+            UpdateSurfaceMarker();
         }
 
-        // ---------------------------------------------------------------------
-        //  Complete Mamdani process:
-        //  Crisp → Fuzzify → Evaluate rules → Implication → Aggregate → Centroid
-        // ---------------------------------------------------------------------
         private void RunMamdani()
         {
             double distance = (double)nudDistance.Value;
             double direction = (double)nudDirection.Value;
 
-            // 1) FUZZIFICATION
-            // Convert each crisp input into membership degrees of every fuzzy set.
-            double near = MuNear(distance);
-            double medium = MuMedium(distance);
-            double far = MuFar(distance);
+            double near, medium, far, left, center, right;
+            MamdaniController.Fuzzify(distance, direction,
+                out near, out medium, out far, out left, out center, out right);
 
-            double left = MuLeft(direction);
-            double center = MuCenter(direction);
-            double right = MuRight(direction);
+            double r1, r2, r3, r4, r5, r6, r7, r8, r9;
+            MamdaniController.EvaluateRules(near, medium, far, left, center, right,
+                out r1, out r2, out r3, out r4, out r5, out r6, out r7, out r8, out r9);
 
-            // 2) RULE EVALUATION
-            // 9 rules cover every Distance × Direction pair.
-            // AND is implemented with Math.Min (standard Mamdani t-norm).
-            // OR would use Math.Max (not needed in this rule base).
-            //
-            // Distance \ Direction | Left        | Center      | Right
-            // Near                 | Turn Right  | Stop        | Turn Left
-            // Medium               | Turn Right  | Forward     | Turn Left
-            // Far                  | Forward     | Forward     | Forward
-
-            double r1 = Math.Min(near, left);       // Near + Left   → Turn Right
-            double r2 = Math.Min(near, center);     // Near + Center → Stop
-            double r3 = Math.Min(near, right);      // Near + Right  → Turn Left
-            double r4 = Math.Min(medium, left);     // Medium + Left → Turn Right
-            double r5 = Math.Min(medium, center);   // Medium + Center → Forward
-            double r6 = Math.Min(medium, right);    // Medium + Right → Turn Left
-            double r7 = Math.Min(far, left);        // Far + Left    → Forward
-            double r8 = Math.Min(far, center);      // Far + Center  → Forward
-            double r9 = Math.Min(far, right);       // Far + Right   → Forward
-
-            // 3) IMPLICATION + 4) AGGREGATION + 5) CENTROID DEFUZZIFICATION
-            double crispOutput = DefuzzifyCentroid(
+            double crispOutput = MamdaniController.DefuzzifyCentroid(
                 r1, r2, r3, r4, r5, r6, r7, r8, r9);
 
-            string movement = MovementFromCrisp(crispOutput);
+            string movement = MamdaniController.MovementFromCrisp(crispOutput);
 
             UpdateUi(
                 distance, direction,
@@ -198,77 +102,6 @@ namespace RobotObstacle
                 left, center, right,
                 r1, r2, r3, r4, r5, r6, r7, r8, r9,
                 crispOutput, movement);
-        }
-
-        // Implication: clip each output set with Math.Min(ruleStrength, μ_output(y))
-        // Aggregation: combine clipped sets with Math.Max
-        // Defuzzification: Center of Gravity
-        //     crisp = Σ (y * μ(y))  /  Σ μ(y)
-        static double DefuzzifyCentroid(
-            double r1, double r2, double r3,
-            double r4, double r5, double r6,
-            double r7, double r8, double r9)
-        {
-            double weightedSum = 0.0;
-            double membershipSum = 0.0;
-
-            for (double y = 0.0; y <= 100.0; y += IntegrationStep)
-            {
-                // Clipped membership of each rule's output set at this y.
-                double c1 = Math.Min(r1, MuTurnRight(y));
-                double c2 = Math.Min(r2, MuStop(y));
-                double c3 = Math.Min(r3, MuTurnLeft(y));
-                double c4 = Math.Min(r4, MuTurnRight(y));
-                double c5 = Math.Min(r5, MuForward(y));
-                double c6 = Math.Min(r6, MuTurnLeft(y));
-                double c7 = Math.Min(r7, MuForward(y));
-                double c8 = Math.Min(r8, MuForward(y));
-                double c9 = Math.Min(r9, MuForward(y));
-
-                // Aggregate with MAX (Mamdani union of clipped output sets).
-                double mu = c1;
-                mu = Math.Max(mu, c2);
-                mu = Math.Max(mu, c3);
-                mu = Math.Max(mu, c4);
-                mu = Math.Max(mu, c5);
-                mu = Math.Max(mu, c6);
-                mu = Math.Max(mu, c7);
-                mu = Math.Max(mu, c8);
-                mu = Math.Max(mu, c9);
-
-                weightedSum += y * mu;
-                membershipSum += mu;
-            }
-
-            if (membershipSum == 0.0)
-                return double.NaN; // indicate no activation
-
-            return weightedSum / membershipSum;
-        }
-
-        // Map the numeric centroid back to a movement label using the
-        // four output peaks: 0, 33, 66, 100.
-        static string MovementFromCrisp(double crisp)
-        {
-            if (double.IsNaN(crisp))
-                return "NO ACTIVATION";
-
-            double[] peaks = { 0.0, 33.0, 66.0, 100.0 };
-            string[] labels = { "TURN LEFT", "FORWARD", "TURN RIGHT", "STOP" };
-
-            int best = 0;
-            double bestDistance = Math.Abs(crisp - peaks[0]);
-            for (int i = 1; i < peaks.Length; i++)
-            {
-                double d = Math.Abs(crisp - peaks[i]);
-                if (d < bestDistance)
-                {
-                    bestDistance = d;
-                    best = i;
-                }
-            }
-
-            return labels[best];
         }
 
         private void UpdateUi(
@@ -311,9 +144,9 @@ namespace RobotObstacle
                 "Crisp Output: " + (double.IsNaN(crispOutput) ? "NO ACTIVATION" : Format(crispOutput)) + Environment.NewLine +
                 "Movement:     " + movement;
 
-            // Update plots and control surface visual
             PlotAllMemberships();
-            RenderControlSurface();
+            DrawHeatmapWithMarker();
+            UpdateSurfaceMarker();
         }
 
         static string Format(double value)
@@ -338,6 +171,7 @@ namespace RobotObstacle
             syncingInputs = true;
             tbDistance.Value = (int)Math.Round((double)nudDistance.Value);
             syncingInputs = false;
+            RunMamdani();
         }
 
         private void tbDirection_Scroll(object sender, EventArgs e)
@@ -360,23 +194,42 @@ namespace RobotObstacle
             RunMamdani();
         }
 
-        // -------------------------
-        // Charts and Visualizations
-        // -------------------------
         private void InitializeCharts()
         {
-            // Initialize picture-box based plots (no-op placeholder)
-            // Ensure picture boxes have a blank image so drawing can occur
             try
             {
-                if (chartDistance.Image == null) chartDistance.Image = new Bitmap(chartDistance.Width > 0 ? chartDistance.Width : 300, chartDistance.Height > 0 ? chartDistance.Height : 150);
-                if (chartDirection.Image == null) chartDirection.Image = new Bitmap(chartDirection.Width > 0 ? chartDirection.Width : 300, chartDirection.Height > 0 ? chartDirection.Height : 150);
-                if (chartOutput.Image == null) chartOutput.Image = new Bitmap(chartOutput.Width > 0 ? chartOutput.Width : 300, chartOutput.Height > 0 ? chartOutput.Height : 150);
+                if (chartDistance.Image == null)
+                    chartDistance.Image = new Bitmap(Math.Max(1, chartDistance.Width), Math.Max(1, chartDistance.Height));
+                if (chartDirection.Image == null)
+                    chartDirection.Image = new Bitmap(Math.Max(1, chartDirection.Width), Math.Max(1, chartDirection.Height));
+                if (chartOutput.Image == null)
+                    chartOutput.Image = new Bitmap(Math.Max(1, chartOutput.Width), Math.Max(1, chartOutput.Height));
             }
-            catch { }
-        }
+            catch
+            {
+            }
 
-        // Chart support removed; use PictureBox bitmap drawing instead.
+            ChartArea area = chartSurface.ChartAreas["Default"];
+            area.Area3DStyle.Enable3D = true;
+            area.Area3DStyle.Inclination = 25;
+            area.Area3DStyle.Rotation = 35;
+            area.Area3DStyle.LightStyle = LightStyle.Simplistic;
+            area.Area3DStyle.WallWidth = 0;
+            area.Area3DStyle.PointDepth = 80;
+            area.Area3DStyle.PointGapDepth = 0;
+            area.AxisX.Title = "Distance (cm)";
+            area.AxisX.Minimum = 0;
+            area.AxisX.Maximum = 100;
+            area.AxisY.Title = "Crisp Movement Output";
+            area.AxisY.Minimum = 0;
+            area.AxisY.Maximum = 100;
+            area.AxisX.MajorGrid.Enabled = false;
+            area.AxisY.MajorGrid.Enabled = false;
+
+            tbRotation.Value = 35;
+            tbInclination.Value = 25;
+            lblSurfaceStatus.Text = "Building 40×40 live Mamdani surface...";
+        }
 
         private void PlotAllMemberships()
         {
@@ -395,9 +248,6 @@ namespace RobotObstacle
                 using (var g = Graphics.FromImage(bmp))
                 {
                     g.Clear(Color.White);
-                    Pen pNear = Pens.Red;
-                    Pen pMed = Pens.Green;
-                    Pen pFar = Pens.Blue;
                     PointF[] ptsNear = new PointF[101];
                     PointF[] ptsMed = new PointF[101];
                     PointF[] ptsFar = new PointF[101];
@@ -405,17 +255,19 @@ namespace RobotObstacle
                     {
                         double x = i;
                         float px = (float)i / 100f * (w - 20) + 10;
-                        ptsNear[i] = new PointF(px, (float)((1 - MuNear(x)) * (h - 20) + 10));
-                        ptsMed[i] = new PointF(px, (float)((1 - MuMedium(x)) * (h - 20) + 10));
-                        ptsFar[i] = new PointF(px, (float)((1 - MuFar(x)) * (h - 20) + 10));
+                        ptsNear[i] = new PointF(px, (float)((1 - MamdaniController.MuNear(x)) * (h - 20) + 10));
+                        ptsMed[i] = new PointF(px, (float)((1 - MamdaniController.MuMedium(x)) * (h - 20) + 10));
+                        ptsFar[i] = new PointF(px, (float)((1 - MamdaniController.MuFar(x)) * (h - 20) + 10));
                     }
-                    g.DrawLines(pNear, ptsNear);
-                    g.DrawLines(pMed, ptsMed);
-                    g.DrawLines(pFar, ptsFar);
+                    g.DrawLines(Pens.Red, ptsNear);
+                    g.DrawLines(Pens.Green, ptsMed);
+                    g.DrawLines(Pens.Blue, ptsFar);
                     picAssign(chartDistance, bmp);
                 }
             }
-            catch { }
+            catch
+            {
+            }
         }
 
         private void PlotDirectionMemberships()
@@ -428,26 +280,25 @@ namespace RobotObstacle
                 using (var g = Graphics.FromImage(bmp))
                 {
                     g.Clear(Color.White);
-                    Pen pLeft = Pens.Red;
-                    Pen pCenter = Pens.Green;
-                    Pen pRight = Pens.Blue;
                     var ptsL = new System.Collections.Generic.List<PointF>();
                     var ptsC = new System.Collections.Generic.List<PointF>();
                     var ptsR = new System.Collections.Generic.List<PointF>();
                     for (int i = -100; i <= 100; i += 2)
                     {
                         float px = (float)(i + 100) / 200f * (w - 20) + 10;
-                        ptsL.Add(new PointF(px, (float)((1 - MuLeft(i)) * (h - 20) + 10)));
-                        ptsC.Add(new PointF(px, (float)((1 - MuCenter(i)) * (h - 20) + 10)));
-                        ptsR.Add(new PointF(px, (float)((1 - MuRight(i)) * (h - 20) + 10)));
+                        ptsL.Add(new PointF(px, (float)((1 - MamdaniController.MuLeft(i)) * (h - 20) + 10)));
+                        ptsC.Add(new PointF(px, (float)((1 - MamdaniController.MuCenter(i)) * (h - 20) + 10)));
+                        ptsR.Add(new PointF(px, (float)((1 - MamdaniController.MuRight(i)) * (h - 20) + 10)));
                     }
-                    g.DrawLines(pLeft, ptsL.ToArray());
-                    g.DrawLines(pCenter, ptsC.ToArray());
-                    g.DrawLines(pRight, ptsR.ToArray());
+                    g.DrawLines(Pens.Red, ptsL.ToArray());
+                    g.DrawLines(Pens.Green, ptsC.ToArray());
+                    g.DrawLines(Pens.Blue, ptsR.ToArray());
                     picAssign(chartDirection, bmp);
                 }
             }
-            catch { }
+            catch
+            {
+            }
         }
 
         private void PlotOutputMemberships()
@@ -455,12 +306,11 @@ namespace RobotObstacle
             try
             {
                 int w = Math.Max(300, chartOutput.Width);
-                int h = Math.Max(300, chartOutput.Height);
+                int h = Math.Max(150, chartOutput.Height);
                 using (var bmp = new Bitmap(w, h))
                 using (var g = Graphics.FromImage(bmp))
                 {
                     g.Clear(Color.White);
-                    Pen pTL = Pens.Red; Pen pF = Pens.Green; Pen pTR = Pens.Blue; Pen pS = Pens.Purple;
                     var ptsTL = new System.Collections.Generic.List<PointF>();
                     var ptsF = new System.Collections.Generic.List<PointF>();
                     var ptsTR = new System.Collections.Generic.List<PointF>();
@@ -468,83 +318,266 @@ namespace RobotObstacle
                     for (int i = 0; i <= 100; i++)
                     {
                         float px = (float)i / 100f * (w - 20) + 10;
-                        ptsTL.Add(new PointF(px, (float)((1 - MuTurnLeft(i)) * (h - 20) + 10)));
-                        ptsF.Add(new PointF(px, (float)((1 - MuForward(i)) * (h - 20) + 10)));
-                        ptsTR.Add(new PointF(px, (float)((1 - MuTurnRight(i)) * (h - 20) + 10)));
-                        ptsS.Add(new PointF(px, (float)((1 - MuStop(i)) * (h - 20) + 10)));
+                        ptsTL.Add(new PointF(px, (float)((1 - MamdaniController.MuTurnLeft(i)) * (h - 20) + 10)));
+                        ptsF.Add(new PointF(px, (float)((1 - MamdaniController.MuForward(i)) * (h - 20) + 10)));
+                        ptsTR.Add(new PointF(px, (float)((1 - MamdaniController.MuTurnRight(i)) * (h - 20) + 10)));
+                        ptsS.Add(new PointF(px, (float)((1 - MamdaniController.MuStop(i)) * (h - 20) + 10)));
                     }
-                    g.DrawLines(pTL, ptsTL.ToArray());
-                    g.DrawLines(pF, ptsF.ToArray());
-                    g.DrawLines(pTR, ptsTR.ToArray());
-                    g.DrawLines(pS, ptsS.ToArray());
+                    g.DrawLines(Pens.Red, ptsTL.ToArray());
+                    g.DrawLines(Pens.Green, ptsF.ToArray());
+                    g.DrawLines(Pens.Blue, ptsTR.ToArray());
+                    g.DrawLines(Pens.Purple, ptsS.ToArray());
                     picAssign(chartOutput, bmp);
                 }
             }
-            catch { }
-        }
-
-        private void picAssign(System.Windows.Forms.PictureBox pic, Bitmap bmp)
-        {
-            try
+            catch
             {
-                pic.Image?.Dispose();
-                pic.Image = (Bitmap)bmp.Clone();
             }
-            catch { }
         }
 
-        private void RenderControlSurface()
+        private void picAssign(PictureBox pic, Bitmap bmp)
         {
             try
             {
-                int w = picSurface.Width > 0 ? picSurface.Width : 256;
-                int h = picSurface.Height > 0 ? picSurface.Height : 256;
-                using (var bmp = new Bitmap(w, h))
+                Image old = pic.Image;
+                pic.Image = (Bitmap)bmp.Clone();
+                if (old != null)
+                    old.Dispose();
+            }
+            catch
+            {
+            }
+        }
+
+        private void RequestSurfaceCompute(int resolution, bool isHighRes)
+        {
+            int gen = Interlocked.Increment(ref surfaceGeneration);
+            if (lblSurfaceStatus != null)
+            {
+                lblSurfaceStatus.Text = isHighRes
+                    ? "Computing 100×100 high-resolution Mamdani surface..."
+                    : "Computing 40×40 live Mamdani surface...";
+            }
+
+            Task.Factory.StartNew(() =>
+            {
+                double[,] z = MamdaniController.ComputeSurfaceGrid(resolution);
+                if (gen != surfaceGeneration)
+                    return;
+
+                if (IsDisposed)
+                    return;
+
+                try
                 {
-                    for (int px = 0; px < w; px++)
-                    {
-                        for (int py = 0; py < h; py++)
-                        {
-                            double distance = (double)px / (w - 1) * 100.0;
-                            double direction = (double)py / (h - 1) * 200.0 - 100.0;
-                            double near = MuNear(distance);
-                            double medium = MuMedium(distance);
-                            double far = MuFar(distance);
-                            double left = MuLeft(direction);
-                            double center = MuCenter(direction);
-                            double right = MuRight(direction);
-                            double r1 = Math.Min(near, left);
-                            double r2 = Math.Min(near, center);
-                            double r3 = Math.Min(near, right);
-                            double r4 = Math.Min(medium, left);
-                            double r5 = Math.Min(medium, center);
-                            double r6 = Math.Min(medium, right);
-                            double r7 = Math.Min(far, left);
-                            double r8 = Math.Min(far, center);
-                            double r9 = Math.Min(far, right);
-                            double crisp = DefuzzifyCentroid(r1, r2, r3, r4, r5, r6, r7, r8, r9);
-                            Color col;
-                            if (double.IsNaN(crisp))
-                                col = Color.Black;
-                            else
-                            {
-                                // Map 0..100 to hue 240->0 (blue->red)
-                                double t = crisp / 100.0;
-                                int hue = (int)(240 - 240 * t);
-                                col = HsvToRgb(hue, 0.9, 0.9);
-                            }
-                            bmp.SetPixel(px, h - 1 - py, col);
-                        }
-                    }
-                    // Assign to PictureBox (clone to avoid disposed bitmap issues)
-                    picSurface.Image?.Dispose();
-                    picSurface.Image = (Bitmap)bmp.Clone();
+                    BeginInvoke(new Action(() => ApplySurfaceGrid(z, resolution, isHighRes, gen)));
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+            });
+        }
+
+        private void ApplySurfaceGrid(double[,] z, int resolution, bool isHighRes, int gen)
+        {
+            if (IsDisposed || gen != surfaceGeneration)
+                return;
+
+            surfaceZ = z;
+            surfaceResolution = resolution;
+
+            if (heatmapBase != null)
+            {
+                heatmapBase.Dispose();
+                heatmapBase = null;
+            }
+
+            heatmapBase = BuildHeatmapBitmap(z, resolution);
+            DrawHeatmapWithMarker();
+            RebuildSurfaceChart(z, resolution);
+            UpdateSurfaceMarker();
+
+            lblSurfaceStatus.Text = isHighRes
+                ? "High-res 100×100 surface (actual Mamdani centroids). Depth axis = Direction."
+                : "Live 40×40 surface (actual Mamdani centroids). Depth axis = Direction.";
+
+            if (!isHighRes && !highResQueued)
+            {
+                highResQueued = true;
+                surfaceDebounce.Stop();
+                surfaceDebounce.Interval = 400;
+                surfaceDebounce.Start();
+            }
+        }
+
+        private void surfaceDebounce_Tick(object sender, EventArgs e)
+        {
+            surfaceDebounce.Stop();
+            RequestSurfaceCompute(HighResSurfaceResolution, true);
+        }
+
+        private void btnHighRes_Click(object sender, EventArgs e)
+        {
+            surfaceDebounce.Stop();
+            RequestSurfaceCompute(HighResSurfaceResolution, true);
+        }
+
+        private Bitmap BuildHeatmapBitmap(double[,] z, int resolution)
+        {
+            int w = 256;
+            int h = 256;
+            var bmp = new Bitmap(w, h);
+            for (int px = 0; px < w; px++)
+            {
+                for (int py = 0; py < h; py++)
+                {
+                    double gx = (double)px / (w - 1) * (resolution - 1);
+                    double gy = (double)py / (h - 1) * (resolution - 1);
+                    double crisp = SampleGrid(z, resolution, gx, gy);
+                    Color col = double.IsNaN(crisp) ? Color.Black : HsvToRgb((int)(240 - 240 * (crisp / 100.0)), 0.9, 0.9);
+                    bmp.SetPixel(px, h - 1 - py, col);
                 }
             }
-            catch { }
+            return bmp;
         }
 
-        // Simple HSV->RGB converter (h in degrees 0..360)
+        static double SampleGrid(double[,] z, int resolution, double gx, double gy)
+        {
+            int i0 = (int)Math.Floor(gx);
+            int j0 = (int)Math.Floor(gy);
+            int i1 = Math.Min(resolution - 1, i0 + 1);
+            int j1 = Math.Min(resolution - 1, j0 + 1);
+            i0 = Math.Max(0, Math.Min(resolution - 1, i0));
+            j0 = Math.Max(0, Math.Min(resolution - 1, j0));
+            double tx = gx - i0;
+            double ty = gy - j0;
+            double v00 = z[i0, j0];
+            double v10 = z[i1, j0];
+            double v01 = z[i0, j1];
+            double v11 = z[i1, j1];
+            if (double.IsNaN(v00) || double.IsNaN(v10) || double.IsNaN(v01) || double.IsNaN(v11))
+                return v00;
+            double a = v00 * (1 - tx) + v10 * tx;
+            double b = v01 * (1 - tx) + v11 * tx;
+            return a * (1 - ty) + b * ty;
+        }
+
+        private void DrawHeatmapWithMarker()
+        {
+            if (picSurface == null)
+                return;
+
+            int w = picSurface.Width > 0 ? picSurface.Width : 256;
+            int h = picSurface.Height > 0 ? picSurface.Height : 256;
+            var bmp = new Bitmap(w, h);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.White);
+                if (heatmapBase != null)
+                    g.DrawImage(heatmapBase, 0, 0, w, h);
+
+                double distance = (double)nudDistance.Value;
+                double direction = (double)nudDirection.Value;
+                float mx = (float)(distance / 100.0 * (w - 1));
+                float my = (float)((1.0 - (direction + 100.0) / 200.0) * (h - 1));
+                using (Pen p = new Pen(Color.White, 2f))
+                using (Pen p2 = new Pen(Color.Black, 1f))
+                {
+                    g.DrawLine(p, mx - 8, my, mx + 8, my);
+                    g.DrawLine(p, mx, my - 8, mx, my + 8);
+                    g.DrawEllipse(p2, mx - 6, my - 6, 12, 12);
+                    g.DrawEllipse(p, mx - 5, my - 5, 10, 10);
+                }
+            }
+
+            Image old = picSurface.Image;
+            picSurface.Image = bmp;
+            if (old != null)
+                old.Dispose();
+        }
+
+        private void RebuildSurfaceChart(double[,] z, int resolution)
+        {
+            chartSurface.Series.Clear();
+            chartSurface.Legends.Clear();
+
+            // One line series per Direction sample. With 3D enabled, series are
+            // stacked along the depth axis, which is Direction (−100 at the back).
+            for (int j = 0; j < resolution; j++)
+            {
+                Series row = new Series("dir" + j.ToString(CultureInfo.InvariantCulture));
+                row.ChartType = SeriesChartType.Line;
+                row.ChartArea = "Default";
+                row.IsVisibleInLegend = false;
+                row.BorderWidth = 1;
+                for (int i = 0; i < resolution; i++)
+                {
+                    double distance = (double)i / (resolution - 1) * 100.0;
+                    double crisp = z[i, j];
+                    if (double.IsNaN(crisp))
+                        crisp = 0;
+                    int idx = row.Points.AddXY(distance, crisp);
+                    row.Points[idx].Color = HsvToRgb((int)(240 - 240 * (crisp / 100.0)), 0.9, 0.9);
+                }
+                chartSurface.Series.Add(row);
+            }
+
+            Series marker = new Series("Current input");
+            marker.ChartType = SeriesChartType.Point;
+            marker.ChartArea = "Default";
+            marker.MarkerStyle = MarkerStyle.Diamond;
+            marker.MarkerSize = 12;
+            marker.MarkerColor = Color.White;
+            marker.MarkerBorderColor = Color.Black;
+            marker.MarkerBorderWidth = 2;
+            chartSurface.Series.Add(marker);
+        }
+
+        private void UpdateSurfaceMarker()
+        {
+            if (chartSurface.Series.Count == 0)
+                return;
+
+            Series marker = chartSurface.Series.FindByName("Current input");
+            if (marker == null)
+                return;
+
+            double distance = (double)nudDistance.Value;
+            double direction = (double)nudDirection.Value;
+            double crisp = MamdaniController.ComputeCrispOutput(distance, direction);
+            if (double.IsNaN(crisp))
+                crisp = 0;
+
+            marker.Points.Clear();
+            marker.Points.AddXY(distance, crisp);
+
+            // Place the marker series at the Direction depth that matches the input.
+            if (surfaceResolution > 1)
+            {
+                int j = (int)Math.Round((direction + 100.0) / 200.0 * (surfaceResolution - 1));
+                if (j < 0) j = 0;
+                if (j >= surfaceResolution) j = surfaceResolution - 1;
+                int current = chartSurface.Series.IndexOf(marker);
+                if (current >= 0 && current != j)
+                {
+                    chartSurface.Series.RemoveAt(current);
+                    if (j > chartSurface.Series.Count)
+                        j = chartSurface.Series.Count;
+                    chartSurface.Series.Insert(j, marker);
+                }
+            }
+        }
+
+        private void tbRotation_Scroll(object sender, EventArgs e)
+        {
+            chartSurface.ChartAreas["Default"].Area3DStyle.Rotation = tbRotation.Value;
+        }
+
+        private void tbInclination_Scroll(object sender, EventArgs e)
+        {
+            chartSurface.ChartAreas["Default"].Area3DStyle.Inclination = tbInclination.Value;
+        }
+
         private static Color HsvToRgb(int h, double s, double v)
         {
             double hh = (h % 360) / 60.0;
@@ -573,9 +606,6 @@ namespace RobotObstacle
             return (int)Math.Round(v);
         }
 
-        // -------------------------
-        // Test harness
-        // -------------------------
         private void btnRunTests_Click(object sender, EventArgs e)
         {
             RunTests();
@@ -584,55 +614,19 @@ namespace RobotObstacle
         private void RunTests()
         {
             var sb = new StringBuilder();
-            sb.AppendLine("Canonical 9-rule tests:");
-            var distances = new double[] { 10.0, 50.0, 90.0 }; // near, medium, far (representative)
-            var directions = new double[] { -100.0, 0.0, 100.0 }; // left, center, right
-            for (int i = 0; i < distances.Length; i++)
-            {
-                for (int j = 0; j < directions.Length; j++)
-                {
-                    double d = distances[i]; double dir = directions[j];
-                    double near = MuNear(d); double med = MuMedium(d); double far = MuFar(d);
-                    double left = MuLeft(dir); double center = MuCenter(dir); double right = MuRight(dir);
-                    double r1 = Math.Min(near, left);
-                    double r2 = Math.Min(near, center);
-                    double r3 = Math.Min(near, right);
-                    double r4 = Math.Min(med, left);
-                    double r5 = Math.Min(med, center);
-                    double r6 = Math.Min(med, right);
-                    double r7 = Math.Min(far, left);
-                    double r8 = Math.Min(far, center);
-                    double r9 = Math.Min(far, right);
-                    double crisp = DefuzzifyCentroid(r1, r2, r3, r4, r5, r6, r7, r8, r9);
-                    string move = MovementFromCrisp(crisp);
-                    sb.AppendLine($"D={d}, Dir={dir} => Crisp={(double.IsNaN(crisp)?"NaN":Format(crisp))}, Move={move}");
-                }
-            }
-            sb.AppendLine();
-            sb.AppendLine("Boundary tests:");
-            var bDistances = new double[] { 0, 20, 50, 80, 100 };
-            var bDirections = new double[] { -100, -50, 0, 50, 100 };
-            foreach (var d in bDistances)
-            {
-                foreach (var dir in bDirections)
-                {
-                    double near = MuNear(d); double med = MuMedium(d); double far = MuFar(d);
-                    double left = MuLeft(dir); double center = MuCenter(dir); double right = MuRight(dir);
-                    double r1 = Math.Min(near, left);
-                    double r2 = Math.Min(near, center);
-                    double r3 = Math.Min(near, right);
-                    double r4 = Math.Min(med, left);
-                    double r5 = Math.Min(med, center);
-                    double r6 = Math.Min(med, right);
-                    double r7 = Math.Min(far, left);
-                    double r8 = Math.Min(far, center);
-                    double r9 = Math.Min(far, right);
-                    double crisp = DefuzzifyCentroid(r1, r2, r3, r4, r5, r6, r7, r8, r9);
-                    string move = MovementFromCrisp(crisp);
-                    sb.AppendLine($"D={d,3}, Dir={dir,4} => Crisp={(double.IsNaN(crisp)?"NaN":Format(crisp))}, Move={move}");
-                }
-            }
+            FuzzyTests.Run(sb);
             txtTests.Text = sb.ToString();
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            Interlocked.Increment(ref surfaceGeneration);
+            if (heatmapBase != null)
+            {
+                heatmapBase.Dispose();
+                heatmapBase = null;
+            }
+            base.OnFormClosing(e);
         }
     }
 }

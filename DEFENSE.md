@@ -51,5 +51,9 @@ Why these numeric ranges for inputs?
 How do multiple rules affect output?
 - Each rule contributes a clipped MF. Aggregation with Max merges these contributions and centroid computes a combined numeric response.
 
-How to demonstrate during demo?
-- Move Distance across a boundary (e.g., 49→51) and show membership degrees and resulting centroid shifting smoothly. Show the heatmap to demonstrate global behavior.
+How is the 3D surface generated?
+- Every grid point (Distance, Direction) is sent through the same Mamdani function as the on-screen output: fuzzify, 9 AND rules, clip, max-aggregate, centroid. Height is that centroid. Live mesh is 40×40; high-res is 100×100.
+
+Why keep the 2D heatmap?
+- The heatmap is a top-down view of the same grid (color = centroid). It is easier to read global regions (stop vs turn vs forward) while the 3D chart shows the shape of the mapping.
+- Move Distance across a boundary (e.g., 49→51) and show membership degrees and resulting centroid shifting smoothly. Show the 2D heatmap and 3D surface (rotate with the sliders) so the current-input marker travels on the actual Mamdani control surface.
