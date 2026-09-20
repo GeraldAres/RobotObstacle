@@ -44,10 +44,28 @@ namespace RobotObstacle
             }
 
             log.AppendLine();
+            CheckVisualizationPayload(ref fail, log);
+
             log.AppendLine(fail == 0
                 ? "ALL TESTS PASSED"
                 : ("FAILED: " + fail.ToString(CultureInfo.InvariantCulture)));
             return fail;
+        }
+
+        static void CheckVisualizationPayload(ref int fail, StringBuilder log)
+        {
+            string payload = RobotVisualizationBridge.BuildPayload(35.0, -20.0, 42.5, "TURN RIGHT");
+            bool ok = payload.Contains("\"distance\":35.00")
+                && payload.Contains("\"direction\":-20.00")
+                && payload.Contains("\"crisp_output\":42.50")
+                && payload.Contains("\"movement\":\"TURN RIGHT\"");
+
+            if (!ok)
+                fail++;
+
+            log.AppendLine(ok
+                ? "PASS Visualization payload uses canonical C# values"
+                : "FAIL Visualization payload is missing expected values");
         }
 
         static void Check(double distance, double direction, string expectedMove, ref int fail, StringBuilder log)

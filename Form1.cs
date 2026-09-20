@@ -1,7 +1,5 @@
 ﻿using System;
 using System.Drawing;
-using System.Threading;
-using System.Threading.Tasks;
 using System.Globalization;
 using System.Text;
 using System.Threading;
@@ -19,6 +17,7 @@ namespace RobotObstacle
         private int surfaceResolution;
         private Bitmap heatmapBase;
         private bool highResQueued;
+        private RobotVisualizationBridge visualizationBridge;
 
         public const int LiveSurfaceResolution = 40;
         public const int HighResSurfaceResolution = 100;
@@ -26,6 +25,7 @@ namespace RobotObstacle
         public Form1()
         {
             InitializeComponent();
+            visualizationBridge = new RobotVisualizationBridge();
             // surface debounce Timer is created in Designer as 'surfaceDebounce'.
         }
 
@@ -143,6 +143,11 @@ namespace RobotObstacle
             txtResult.Text =
                 "Crisp Output: " + (double.IsNaN(crispOutput) ? "NO ACTIVATION" : Format(crispOutput)) + Environment.NewLine +
                 "Movement:     " + movement;
+
+            if (!double.IsNaN(crispOutput))
+            {
+                visualizationBridge.SendState(distance, direction, crispOutput, movement);
+            }
 
             PlotAllMemberships();
             DrawHeatmapWithMarker();
@@ -621,6 +626,10 @@ namespace RobotObstacle
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             Interlocked.Increment(ref surfaceGeneration);
+            if (visualizationBridge != null)
+            {
+                visualizationBridge.Dispose();
+            }
             if (heatmapBase != null)
             {
                 heatmapBase.Dispose();

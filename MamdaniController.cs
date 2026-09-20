@@ -7,6 +7,11 @@ namespace RobotObstacle
     {
         public const double IntegrationStep = 0.5;
 
+        public static string GetMovementTextFromCrisp(double crisp)
+        {
+            return MovementFromCrisp(crisp);
+        }
+
         public static double TriangularMembership(double x, double a, double b, double c)
         {
             if (x < a || x > c)

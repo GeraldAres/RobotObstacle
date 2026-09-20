@@ -54,6 +54,7 @@
       <DependentUpon>Form1.cs</DependentUpon>
     </Compile>
     <Compile Include="MamdaniController.cs" />
+    <Compile Include="RobotVisualizationBridge.cs" />
     <Compile Include="FuzzyTests.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
