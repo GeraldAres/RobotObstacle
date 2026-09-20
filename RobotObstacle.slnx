@@ -1,3 +1,7 @@
 <Solution>
+  <Folder Name="/Solution Items/">
+    <File Path="ASSETS.md" />
+    <File Path="RobotVisualization.py" />
+  </Folder>
   <Project Path="RobotObstacle.csproj" Id="10a0cf32-b8ee-4a31-8008-f686f34d03c2" />
 </Solution>
